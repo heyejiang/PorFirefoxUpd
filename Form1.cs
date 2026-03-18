@@ -481,7 +481,6 @@ namespace Firefox_Updater
             Controls.Add(progressBox);
             try
             {
-                List<Task> list = new List<Task>();
                 WebRequest myWebRequest = WebRequest.Create($"https://download.mozilla.org/?{ring[c]}{lang[comboIndex]}");
                 myWebRequest.Proxy = ProxyClass.ProxyServer;
                 WebResponse myWebResponse = myWebRequest.GetResponse();
@@ -489,63 +488,115 @@ namespace Firefox_Updater
                 ServicePoint sp = ServicePointManager.FindServicePoint(uri);
                 sp.ConnectionLimit = 10;
                 myWebResponse.Close();
-                using (WebClient myWebClient = new WebClient())
+
+                string targetFile = $"{applicationPath}\\Firefox_{ring2[c]}_{buildversion[c]}_{architektur[a]}_{lang[comboIndex]}.exe";
+                try
                 {
-                    myWebClient.Proxy = ProxyClass.ProxyServer;
-                    myWebClient.DownloadProgressChanged += (o, args) =>
+                    // Determine existing file size (for resume)
+                    long existingLength = 0;
+                    if (File.Exists(targetFile))
                     {
-                        Control[] buttons = Controls.Find("button" + g, true);
-                        if (buttons.Length > 0)
-                        {
-                            Button button = (Button)buttons[0];
-                            button.BackColor = Color.Orange;
-                        }
-                        progressBarneu.Value = args.ProgressPercentage;
-                        downloadLabel.Text = string.Format("{0} MB's / {1} MB's",
-                            (args.BytesReceived / 1024d / 1024d).ToString("0.00"),
-                            (args.TotalBytesToReceive / 1024d / 1024d).ToString("0.00"));
-                        percLabel.Text = args.ProgressPercentage.ToString() + "%";
-                    };
-                    myWebClient.DownloadFileCompleted += (o, args) =>
+                        var fi = new FileInfo(targetFile);
+                        existingLength = fi.Length;
+                    }
+
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(uri);
+                    req.Proxy = ProxyClass.ProxyServer;
+                    if (existingLength > 0)
                     {
-                        if (args.Error != null)
+                        req.AddRange(existingLength);
+                    }
+
+                    using (HttpWebResponse resp = (HttpWebResponse)await req.GetResponseAsync())
+                    {
+                        long totalBytes = resp.ContentLength;
+                        // If server returned full content (200) and we had an existing file, overwrite
+                        bool append = (resp.StatusCode == HttpStatusCode.PartialContent) && (existingLength > 0);
+                        if (!append)
                         {
-                            MessageBox.Show("Download has been canceled.\n\r" + args.Error.Message);
+                            existingLength = 0;
                         }
-                        else
+
+                        long totalBytesToReceive = (totalBytes > 0) ? existingLength + totalBytes : 0;
+
+                        using (Stream responseStream = resp.GetResponseStream())
+                        using (FileStream fs = new FileStream(targetFile, append ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None))
                         {
-                            downloadLabel.Text = Langfile.Texts("downUnpstart");
-                            string arguments = $" x \"{applicationPath}\\Firefox_{ring2[c]}_{buildversion[c]}_{architektur[a]}_{lang[comboIndex]}.exe\" -o\"{applicationPath}\\Update\\{entpDir[b]}\" -y";
-                            Process process = new Process();
-                            process.StartInfo.FileName = $"{applicationPath}\\Bin\\7zr.exe";
-                            process.StartInfo.WindowStyle = ProcessWindowStyle.Minimized;
-                            process.StartInfo.Arguments = arguments;
-                            process.Start();
-                            process.WaitForExit();
-                            if (File.Exists($"{applicationPath}\\{instDir[b]}\\updates\\Version.log"))
+                            byte[] buffer = new byte[81920];
+                            int read;
+                            long received = 0;
+                            // set button color once
+                            Control[] buttons = Controls.Find("button" + g, true);
+                            if (buttons.Length > 0)
                             {
-                                if (checkBox3.Checked)
+                                this.Invoke((Action)(() =>
                                 {
-                                    string[] instVersion = File.ReadAllText($"{applicationPath}\\{instDir[b]}\\updates\\Version.log").Split(new char[] { '|' });
-                                    if (buildversion[c] != instVersion[0])
+                                    Button button = (Button)buttons[0];
+                                    button.BackColor = Color.Orange;
+                                }));
+                            }
+
+                            while ((read = await responseStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                            {
+                                await fs.WriteAsync(buffer, 0, read);
+                                received += read;
+                                if (totalBytesToReceive > 0)
+                                {
+                                    int percent = (int)((existingLength + received) * 100 / totalBytesToReceive);
+                                    this.Invoke((Action)(() =>
                                     {
-                                        NewMethod4(b, c, a);
-                                    }
-                                    else if ((buildversion[c] == instVersion[0]) && (checkBox4.Checked))
-                                    {
-                                        NewMethod4(b, c, a);
-                                    }
+                                        progressBarneu.Value = Math.Min(100, Math.Max(0, percent));
+                                        downloadLabel.Text = string.Format("{0} MB's / {1} MB's",
+                                            ((existingLength + received) / 1024d / 1024d).ToString("0.00"),
+                                            (totalBytesToReceive / 1024d / 1024d).ToString("0.00"));
+                                        percLabel.Text = progressBarneu.Value.ToString() + "%";
+                                    }));
                                 }
-                                else if (!checkBox3.Checked)
+                                else
+                                {
+                                    this.Invoke((Action)(() =>
+                                    {
+                                        downloadLabel.Text = string.Format("{0} MB's",
+                                            ((existingLength + received) / 1024d / 1024d).ToString("0.00"));
+                                    }));
+                                }
+                            }
+                        }
+
+                        // finished: unpack and post-processing
+                        downloadLabel.Text = Langfile.Texts("downUnpstart");
+                        string arguments = $" x \"{targetFile}\" -o\"{applicationPath}\\Update\\{entpDir[b]}\" -y";
+                        Process process = new Process();
+                        process.StartInfo.FileName = $"{applicationPath}\\Bin\\7zr.exe";
+                        process.StartInfo.WindowStyle = ProcessWindowStyle.Minimized;
+                        process.StartInfo.Arguments = arguments;
+                        process.Start();
+                        process.WaitForExit();
+
+                        if (File.Exists($"{applicationPath}\\{instDir[b]}\\updates\\Version.log"))
+                        {
+                            if (checkBox3.Checked)
+                            {
+                                string[] instVersion = File.ReadAllText($"{applicationPath}\\{instDir[b]}\\updates\\Version.log").Split(new char[] { '|' });
+                                if (buildversion[c] != instVersion[0])
+                                {
+                                    NewMethod4(b, c, a);
+                                }
+                                else if ((buildversion[c] == instVersion[0]) && (checkBox4.Checked))
                                 {
                                     NewMethod4(b, c, a);
                                 }
                             }
-                            else
+                            else if (!checkBox3.Checked)
                             {
-                                NewMethod9(b, c, a);
+                                NewMethod4(b, c, a);
                             }
                         }
+                        else
+                        {
+                            NewMethod9(b, c, a);
+                        }
+
                         if (checkBox5.Checked)
                         {
                             if (!File.Exists($"{deskDir}\\{instDir[b]}.lnk"))
@@ -557,20 +608,18 @@ namespace Firefox_Updater
                         {
                             File.Copy($"{applicationPath}\\Bin\\Launcher\\{instDir[b]} Launcher.exe", $"{applicationPath}\\{instDir[b]} Launcher.exe");
                         }
-                        File.Delete($"{applicationPath}\\Firefox_{ring2[c]}_{buildversion[c]}_{architektur[a]}_{lang[comboIndex]}.exe");
+                        try
+                        {
+                            File.Delete(targetFile);
+                        }
+                        catch { }
                         downloadLabel.Text = Langfile.Texts("downUnpfine");
-                    };
-                    try
-                    {
-                        var task = myWebClient.DownloadFileTaskAsync(uri, $"{applicationPath}\\Firefox_{ring2[c]}_{buildversion[c]}_{architektur[a]}_{lang[comboIndex]}.exe");
-                        list.Add(task);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show(ex.Message);
                     }
                 }
-                await Task.WhenAll(list);
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
                 await Task.Delay(2000);
                 Controls.Remove(progressBox);
             }
